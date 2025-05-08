@@ -36,6 +36,7 @@ jobs:
           envar=$(echo -e $"BODY" | sed -n 3p )
           echo "Envar"
           echo $envar
+          echo -e $"BODY" | sed -n 3p
           echo "========================================================="
           
           ls -la
