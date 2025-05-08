@@ -26,8 +26,8 @@ jobs:
           python-version: 3.11
       - name: test
         env: 
-          # BODY: ${{toJson(github.event.issue.body)}}
-          BODY: ${{ github.event.issue.body }}
+          BODY: ${{toJson(github.event.issue.body)}}
+          # BODY: ${{ github.event.issue.body }}
 
         run: |
           echo "BODY"
