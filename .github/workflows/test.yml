@@ -1,0 +1,38 @@
+name: test
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+  issues: write
+
+
+on:
+  issue_comment:
+    type:
+      - created
+      - edited
+
+
+jobs:
+  test:
+    if: contains(github.event.issue.label.*.name, 'Cicd-Repo') && (github.event.comment.body = 'approved')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: setup python
+        uses: actions/setup-python@2.2.2
+        with:
+          python-version: 3.11
+      - name: test
+        env: 
+          BODY: ${{toJson(github.event.issue.body)}}
+          run: |
+            echo "BODY"
+            echo $BODY
+            envar=$(echo -e "$BODY" | sed -n 3p )
+            echo "Envar"
+            echo $envar
+            ls -la
+            sudo python test.py $envar
+          
