@@ -32,7 +32,7 @@ jobs:
         run: |
           echo "BODY"
           echo $BODY
-          envar=$(echo -e "$BODY" | sed -n 3p )
+          envar=$(echo -e ${{ env.BODY }} | sed -n 3p )
           echo "Envar"
           echo $envar
           ls -la
