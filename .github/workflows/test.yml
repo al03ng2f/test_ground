@@ -27,12 +27,12 @@ jobs:
       - name: test
         env: 
           BODY: ${{toJson(github.event.issue.body)}}
-          run: |
-            echo "BODY"
-            echo $BODY
-            envar=$(echo -e "$BODY" | sed -n 3p )
-            echo "Envar"
-            echo $envar
-            ls -la
-            sudo python test.py $envar
+        run: |
+          echo "BODY"
+          echo $BODY
+          envar=$(echo -e "$BODY" | sed -n 3p )
+          echo "Envar"
+          echo $envar
+          ls -la
+          sudo python test.py $envar
           
