@@ -32,7 +32,10 @@ jobs:
         run: |
           echo "--------------------------"
           echo $0
-          echo -e 'a'
+          echo -e "a"
+          a="$PWD"
+          echo $a
+          
           echo "--------------------------"
           echo "BODY"
           echo $BODY
