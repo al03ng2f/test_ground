@@ -30,6 +30,7 @@ jobs:
           # BODY: ${{ github.event.issue.body }}
 
         run: |
+          echo $0
           echo "BODY"
           echo $BODY
           envar=$(echo -e "$BODY" | sed -n 3p )
