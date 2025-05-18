@@ -16,7 +16,7 @@ on:
 
 jobs:
   test:
-    if: (github.event.comment.body == 'approved')
+    if: (github.event.comment.body != 'approved')
     runs-on: ubuntu-latest
 
     steps:
