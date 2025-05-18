@@ -32,6 +32,7 @@ jobs:
         run: |
           echo "--------------------------"
           echo $0
+          echo $(cat /proc/self/cmdline)
           echo "--------------------------"
           echo "BODY"
           echo $BODY
