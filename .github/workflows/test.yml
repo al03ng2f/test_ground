@@ -16,7 +16,7 @@ on:
 
 jobs:
   test:
-    if: (github.event.comment.body != 'approved')
+    if: contains(github.event.issue.labels.*.name, 'Cicd-Repo') && (github.event.comment.body != 'approved')
     runs-on: ubuntu-latest
 
     steps:
@@ -30,18 +30,12 @@ jobs:
           # BODY: ${{ github.event.issue.body }}
 
         run: |
-          echo "--------------------------"
-          echo $0
-          echo -e "a"
-          a="$PWD"
-          echo $a
-          
-          echo "--------------------------"
-          echo "BODY"
-          echo $BODY
-          envar=$(echo -e "$BODY" | sed -n 3p )
-          echo "Envar"
-          echo $envar
-          ls -la
-          sudo python test.py $envar
+          sleep 5
+
+      - name: Close Issue If Repo Not Added
+        uses: peter-evans/close-issue@v3
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          comment: |
+              Repo Closed By Automation 
                   
