@@ -1,0 +1,57 @@
+name: Add Repo To Cicd Proccess 
+description: Add your repository to be able to use cicd proccess
+title: "[REQ]: Add Repo as cicd"
+labels: ["Cicd-Repo"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Open an issue to add your repositort to the cicd procces (applicative or Iac)
+
+  - type: input
+    id: project_id
+    attributes:
+      label: "Project id"
+      description: Write your project id.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: repo_type
+    attributes:
+      label: "Repo Type"
+      description: Choose your repository type.
+      options:
+      - Application
+      - Iac
+      default: 0
+    validations:
+      required: true
+    
+  - type: input
+    id: repo_name
+    attributes:
+      label: "Repository Name"
+      description: Write your repository name.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: trigger_type
+    attributes:
+      label: "Trigger Type"
+      description: Choose your repository type.
+      options:
+      - push_to_branch
+      - pull_request
+      - tag
+      default: 0
+    validations:
+      required: true
+      
+  - type: input
+    id: trigger_value
+    attributes:
+      label: "Trigger value"
+      description: Write your trigger value (i.e. branch name, tag name etc).
