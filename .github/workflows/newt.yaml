@@ -1,0 +1,551 @@
+name: Terraform PR Workflow on PR Comment
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+
+concurrency:
+  group: environment-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  check_approval:
+    runs-on: ubuntu-latest
+    outputs:
+      approved: ${{ steps.check.outputs.approved }}
+    if: github.event.issue.pull_request != null
+    steps:
+      - name: Check for approved reviews
+        id: check
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const approved = reviews.some(review => review.state === 'APPROVED');
+            core.setOutput('approved', approved);
+
+  start_setup:
+    needs: check_approval
+    if: github.event.issue.pull_request != null && github.event.comment.body == 'start' && needs.check_approval.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: Fetch PR metadata
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('base', pr.data.base.sha);
+            core.setOutput('head', pr.data.head.sha);
+            core.setOutput('ref', pr.data.head.ref);
+            core.setOutput('repo', pr.data.head.repo.full_name);
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.repo }}
+          ref: ${{ steps.pr.outputs.ref }}
+          token: ${{ secrets.PAT }}
+
+      - name: Get changed files
+        id: changes
+        uses: tj-actions/changed-files@9237eb7a0f95c801719e6224d45095d4dda0f9bd
+        with:
+          base_sha: ${{ steps.pr.outputs.base }}
+          sha: ${{ steps.pr.outputs.head }}
+
+      - name: Convert changed files to CSV
+        id: csv
+        run: |
+          echo "all=$(echo '${{ steps.changes.outputs.all_changed_files }}' | tr ' ' ',')" >> $GITHUB_OUTPUT
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Extract Directories and Set Matrix
+        id: set
+        run: |
+          changedFiles="${{ steps.csv.outputs.all }}"
+          comment="${{ github.event.comment.body }}"
+          matrix_json=$(python3 ./scripts/get_changed_directories.py "$changedFiles" "$comment")
+          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+
+  start_plan:
+    needs: [check_approval, start_setup]
+    if: needs.check_approval.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.start_setup.outputs.matrix) }}
+    steps:
+      - name: Fetch PR metadata
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('base', pr.data.base.sha);
+            core.setOutput('head', pr.data.head.sha);
+            core.setOutput('ref', pr.data.head.ref);
+            core.setOutput('repo', pr.data.head.repo.full_name);
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.repo }}
+          ref: ${{ steps.pr.outputs.ref }}
+          token: ${{ secrets.PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v2.2.2
+        with:
+          python-version: 3.11
+
+      - name: Get Service Account
+        id: get_service_account
+        run: |
+          output=$(sudo python ./scripts/get_service_account.py ${{ matrix.configs }})
+          IFS=',' read -r -a array <<< "$output"
+          wif="${array[0]}"
+          service_account="${array[1]}"
+          echo "::set-output name=wif::$wif"
+          echo "::set-output name=service_account::$service_account"
+
+      - id: auth
+        name: Authenticate to Google Cloud
+        uses: 'google-github-actions/auth@v0.4.0'
+        with:
+          token_format: 'access_token'
+          workload_identity_provider: ${{ steps.get_service_account.outputs.wif }}
+          service_account: ${{ steps.get_service_account.outputs.service_account }}
+
+      - name: Link
+        run: |
+          cd ${{ matrix.directory }}
+          directory="${{ matrix.directory }}"
+          env="${{ matrix.configs }}"
+
+          if [[ "$env" == "dev" || "$env" == "prod" ]]; then
+            ./better-stage-links.sh "$env-configs"
+          elif [[ "$directory" == "6-project-factory" ]]; then
+            IFS='-' read -r splited_env subunit unit <<< "$env"
+            splited_env_configs=$(echo "$splited_env" | sed 's/pre//g')
+            ./better-stage-links.sh "$splited_env_configs-configs" "$subunit" "$splited_env" "$unit"
+          else
+            IFS='-' read -r splited_env unit <<< "$env"
+            splited_env_configs=$(echo "$splited_env" | sed 's/pre//g')
+            ./better-stage-links.sh "$splited_env_configs-configs" "$unit"
+          fi
+
+      - uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform init
+        run: |
+          cd ${{ matrix.directory }}
+          terraform init -reconfigure
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd ${{ matrix.directory }} 
+          terraform plan -lock=false -input=false -out workspace.plan
+
+      - name: Terraform Show
+        id: show
+        run: |
+          cd ${{ matrix.directory }} 
+          terraform show -no-color workspace.plan
+
+      - name: Create PR comment
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            State: ${{ matrix.directory }}
+            Environment: ${{ matrix.configs }}
+            Plan: ${{ steps.plan.outcome }}
+            <details><summary>Show Plan</summary>
+
+            ```
+            ${{ steps.show.outputs.stdout }}
+            ```
+
+            </details>
+            Pushed by: @${{ github.actor }}, Action: ${{ github.event_name }}
+
+  apply_setup:
+    needs: check_approval
+    if: github.event.issue.pull_request != null && startsWith(github.event.comment.body, 'apply-') && needs.check_approval.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      matrix_after: ${{ steps.set.outputs.matrix_after }}
+    steps:
+      - name: Fetch PR metadata
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('base', pr.data.base.sha);
+            core.setOutput('head', pr.data.head.sha);
+            core.setOutput('ref', pr.data.head.ref);
+            core.setOutput('repo', pr.data.head.repo.full_name);
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.repo }}
+          ref: ${{ steps.pr.outputs.ref }}
+          token: ${{ secrets.PAT }}
+
+      - name: Get changed files
+        id: changes
+        uses: tj-actions/changed-files@9237eb7a0f95c801719e6224d45095d4dda0f9bd
+        with:
+          base_sha: ${{ steps.pr.outputs.base }}
+          sha: ${{ steps.pr.outputs.head }}
+
+      - name: Convert changed files to CSV
+        id: csv
+        run: |
+          echo "all=$(echo '${{ steps.changes.outputs.all_changed_files }}' | tr ' ' ',')" >> $GITHUB_OUTPUT
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Extract Directories and Set Matrix
+        id: set
+        run: |
+          changedFiles="${{ steps.csv.outputs.all }}"
+          comment="${{ github.event.comment.body }}"
+          modified="${comment/apply-/after-}"
+          matrix_json=$(python3 ./scripts/get_changed_directories.py "$changedFiles" "$comment")
+          matrix_json_after=$(python3 ./scripts/get_changed_directories.py "$changedFiles" "$modified")
+          echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+          echo "matrix_after=$matrix_json_after" >> $GITHUB_OUTPUT
+
+  apply:
+    needs: [check_approval, apply_setup]
+    if: needs.check_approval.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.apply_setup.outputs.matrix) }}
+    steps:
+      - name: Fetch PR metadata
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('base', pr.data.base.sha);
+            core.setOutput('head', pr.data.head.sha);
+            core.setOutput('ref', pr.data.head.ref);
+            core.setOutput('repo', pr.data.head.repo.full_name);
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.repo }}
+          ref: ${{ steps.pr.outputs.ref }}
+          token: ${{ secrets.PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v2.2.2
+        with:
+          python-version: 3.11
+
+      - name: Get Service Account
+        id: get_service_account
+        run: |
+          output=$(sudo python ./scripts/get_service_account.py ${{ matrix.configs }})
+          IFS=',' read -r -a array <<< "$output"
+          wif="${array[0]}"
+          service_account="${array[1]}"
+          echo "::set-output name=wif::$wif"
+          echo "::set-output name=service_account::$service_account"
+
+      - id: auth
+        name: Authenticate to Google Cloud
+        uses: 'google-github-actions/auth@v0.4.0'
+        with:
+          token_format: 'access_token'
+          workload_identity_provider: ${{ steps.get_service_account.outputs.wif }}
+          service_account: ${{ steps.get_service_account.outputs.service_account }}
+
+      - name: Link
+        run: |
+          cd ${{ matrix.directory }}
+          directory="${{ matrix.directory }}"
+          env="${{ matrix.configs }}"
+
+          if [[ "$env" == "dev" || "$env" == "prod" ]]; then
+            ./better-stage-links.sh "$env-configs"
+          elif [[ "$directory" == "6-project-factory" ]]; then
+            IFS='-' read -r splited_env subunit unit <<< "$env"
+            splited_env_configs=$(echo "$splited_env" | sed 's/pre//g')
+            ./better-stage-links.sh "$splited_env_configs-configs" "$subunit" "$splited_env" "$unit"
+          else
+            IFS='-' read -r splited_env unit <<< "$env"
+            splited_env_configs=$(echo "$splited_env" | sed 's/pre//g')
+            ./better-stage-links.sh "$splited_env_configs-configs" "$unit"
+          fi
+
+      - uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform init
+        run: |
+          cd ${{ matrix.directory }}
+          terraform init -reconfigure
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          cd ${{ matrix.directory }}
+          terraform apply -auto-approve -lock-timeout=15m
+
+      - name: git push
+        run: |
+          git pull
+          git config --global user.name "TF APPLY WF"
+          git config --global user.email "runner@sky320.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Auto-update: added comment body"
+          git push
+
+  after_plan:
+    needs: [check_approval, apply, apply_setup]
+    if: needs.check_approval.outputs.approved == 'true' && needs.apply_setup.outputs.matrix_after != 'null'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.apply_setup.outputs.matrix_after) }}
+    steps:
+      - name: Fetch PR metadata
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('base', pr.data.base.sha);
+            core.setOutput('head', pr.data.head.sha);
+            core.setOutput('ref', pr.data.head.ref);
+            core.setOutput('repo', pr.data.head.repo.full_name);
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.repo }}
+          ref: ${{ steps.pr.outputs.ref }}
+          token: ${{ secrets.PAT }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v2.2.2
+        with:
+          python-version: 3.11
+
+      - name: Get Service Account
+        id: get_service_account
+        run: |
+          output=$(sudo python ./scripts/get_service_account.py ${{ matrix.configs }})
+          IFS=',' read -r -a array <<< "$output"
+          wif="${array[0]}"
+          service_account="${array[1]}"
+          echo "::set-output name=wif::$wif"
+          echo "::set-output name=service_account::$service_account"
+
+      - id: auth
+        name: Authenticate to Google Cloud
+        uses: 'google-github-actions/auth@v0.4.0'
+        with:
+          token_format: 'access_token'
+          workload_identity_provider: ${{ steps.get_service_account.outputs.wif }}
+          service_account: ${{ steps.get_service_account.outputs.service_account }}
+
+      - name: Link
+        run: |
+          cd ${{ matrix.directory }}
+          directory="${{ matrix.directory }}"
+          env="${{ matrix.configs }}"
+
+          if [[ "$env" == "dev" || "$env" == "prod" ]]; then
+            ./better-stage-links.sh "$env-configs"
+          elif [[ "$directory" == "6-project-factory" ]]; then
+            IFS='-' read -r splited_env subunit unit <<< "$env"
+            splited_env_configs=$(echo "$splited_env" | sed 's/pre//g')
+            ./better-stage-links.sh "$splited_env_configs-configs" "$subunit" "$splited_env" "$unit"
+          else
+            IFS='-' read -r splited_env unit <<< "$env"
+            splited_env_configs=$(echo "$splited_env" | sed 's/pre//g')
+            ./better-stage-links.sh "$splited_env_configs-configs" "$unit"
+          fi
+
+      - uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform init
+        run: |
+          cd ${{ matrix.directory }}
+          terraform init -reconfigure
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd ${{ matrix.directory }} 
+          terraform plan -lock=false -input=false -out workspace.plan
+
+      - name: Terraform Show
+        id: show
+        run: |
+          cd ${{ matrix.directory }} 
+          terraform show -no-color workspace.plan
+
+      - name: Create PR comment
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            State: ${{ matrix.directory }}
+            Environment: ${{ matrix.configs }}
+            Plan: ${{ steps.plan.outcome }}
+            <details><summary>Show Plan</summary>
+
+            ```
+            ${{ steps.show.outputs.stdout }}
+            ```
+
+            </details>
+            Pushed by: @${{ github.actor }}, Action: ${{ github.event_name }}
+
+  comment_wrong_input:
+    needs: [check_approval]
+    if: needs.check_approval.outputs.approved == 'true' && !startsWith(github.event.comment.body, 'apply-') && github.event.comment.body != 'start'
+    runs-on: ubuntu-latest
+    steps: 
+      - name: Fetch PR metadata
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('base', pr.data.base.sha);
+            core.setOutput('head', pr.data.head.sha);
+            core.setOutput('ref', pr.data.head.ref);
+            core.setOutput('repo', pr.data.head.repo.full_name);
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.repo }}
+          ref: ${{ steps.pr.outputs.ref }}
+          token: ${{ secrets.PAT }}
+          
+      - name: Create PR comment
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            Wrong Input!
+            Next time write: 
+              start if is the first time
+              apply-{the current number that the plan showed} in any other case
+
+
+  comment_finish:
+    needs: [check_approval, apply, apply_setup]
+    if:  needs.check_approval.outputs.approved == 'true' && needs.apply_setup.outputs.matrix_after == 'null'
+    runs-on: ubuntu-latest
+    steps: 
+      - name: Fetch PR metadata
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('base', pr.data.base.sha);
+            core.setOutput('head', pr.data.head.sha);
+            core.setOutput('ref', pr.data.head.ref);
+            core.setOutput('repo', pr.data.head.repo.full_name);
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.repo }}
+          ref: ${{ steps.pr.outputs.ref }}
+          token: ${{ secrets.PAT }}
+          
+      - name: Create PR comment
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            Apply finished!
+
+  on_failure:
+    if: failure()
+    needs: [check_approval, start_setup, start_plan, apply_setup, apply, after_plan, comment_wrong_input, comment_finish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post failure comment
+        uses: peter-evans/create-or-update-comment@v3
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            Workflow failed!
+
+            An error occurred during execution of one or more jobs in the workflow.
+
+            Please check the "Actions" tab for logs and details:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
