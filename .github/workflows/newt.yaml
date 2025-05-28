@@ -251,6 +251,8 @@ jobs:
         run: |
           changedFiles="${{ steps.csv.outputs.all }}"
           comment="${{ github.event.comment.body }}"
+          echo "comment is -----------------------------------------"
+          echo $comment
           modified="${comment/apply-/after-}"
           matrix_json=$(python3 ./scripts/get_changed_directories.py "$changedFiles" "$comment")
           matrix_json_after=$(python3 ./scripts/get_changed_directories.py "$changedFiles" "$modified")
