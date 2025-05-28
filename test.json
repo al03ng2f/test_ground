@@ -1,0 +1,14 @@
+{
+  "universe_domain": "googleapis.com",
+  "type": "external_account",
+  "audience": "//iam.googleapis.com/projects/166660106937/locations/global/workloadIdentityPools/github-test/providers/github",
+  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+  "token_url": "https://sts.googleapis.com/v1/token",
+  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/166660106937-compute@developer.gserviceaccount.com:generateAccessToken",
+  "credential_source": {
+    "file": "./test",
+    "format": {
+      "type": "text"
+    }
+  }
+}
